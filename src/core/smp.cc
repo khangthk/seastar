@@ -18,31 +18,25 @@
 /*
  * Copyright 2019 ScyllaDB
  */
-#ifdef SEASTAR_MODULE
-module;
-#endif
 
-#include <boost/range/algorithm/find_if.hpp>
+#include <algorithm>
 #include <atomic>
+#include <ranges>
 #include <vector>
 #include <regex>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
 
-#ifdef SEASTAR_MODULE
-module seastar;
-#else
 #include <seastar/core/smp.hh>
+#include <seastar/core/alien.hh>
 #include <seastar/core/resource.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/semaphore.hh>
-#include <seastar/core/print.hh>
 #include <seastar/core/on_internal_error.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/core/align.hh>
 #include "prefault.hh"
-#endif
 
 namespace seastar {
 
@@ -86,19 +80,19 @@ static_assert(std::is_nothrow_copy_constructible_v<smp_submit_to_options>);
 static_assert(std::is_nothrow_move_constructible_v<smp_submit_to_options>);
 
 future<smp_service_group> create_smp_service_group(smp_service_group_config ssgc) noexcept {
-    ssgc.max_nonlocal_requests = std::max(ssgc.max_nonlocal_requests, smp::count - 1);
+    ssgc.max_nonlocal_requests = std::max(ssgc.max_nonlocal_requests, this_smp_shard_count() - 1);
     return smp::submit_to(0, [ssgc] {
         return with_semaphore(smp_service_group_management_sem, 1, [ssgc] {
-            auto it = boost::range::find_if(smp_service_groups, [&] (smp_service_group_impl& ssgi) { return ssgi.clients.empty(); });
+            auto it = std::ranges::find_if(smp_service_groups, [&] (smp_service_group_impl& ssgi) { return ssgi.clients.empty(); });
             size_t id = it - smp_service_groups.begin();
-            return parallel_for_each(smp::all_cpus(), [ssgc, id] (unsigned cpu) {
+            return parallel_for_each(this_smp_all_shards(), [ssgc, id] (unsigned cpu) {
               return smp::submit_to(cpu, [ssgc, id, cpu] {
                 if (id >= smp_service_groups.size()) {
                     smp_service_groups.resize(id + 1); // may throw
                 }
-                smp_service_groups[id].clients.reserve(smp::count); // may throw
-                auto per_client = smp::count > 1 ? ssgc.max_nonlocal_requests / (smp::count - 1) : 0u;
-                for (unsigned i = 0; i != smp::count; ++i) {
+                smp_service_groups[id].clients.reserve(this_smp_shard_count()); // may throw
+                auto per_client = this_smp_shard_count() > 1 ? ssgc.max_nonlocal_requests / (this_smp_shard_count() - 1) : 0u;
+                for (unsigned i = 0; i != this_smp_shard_count(); ++i) {
                     smp_service_groups[id].clients.emplace_back(per_client, make_service_group_semaphore_exception_factory(id, i, cpu, ssgc.group_name));
                 }
               });
@@ -146,16 +140,16 @@ future<> destroy_smp_service_group(smp_service_group ssg) noexcept {
 
 void init_default_smp_service_group(shard_id cpu) {
     // default_smp_service_group == smp_service_group(0) -> we assume service groups are empty
-    // at this point. If they are not, it is quite possibly because we are running repeated 
-    // reactors in the program. Probably a test (see #2148). 
+    // at this point. If they are not, it is quite possibly because we are running repeated
+    // reactors in the program. Probably a test (see #2148).
     // This would be fine, we just create extra junk here, _but_ it is quite possible
     // that we actually run with different cpu count (see smp_options::smp), in which case
     // the `get_smp_service_groups_semaphore` below can cause us to return uninitialized memory.
     smp_service_groups.clear();
     smp_service_groups.emplace_back();
     auto& ssg0 = smp_service_groups.back();
-    ssg0.clients.reserve(smp::count);
-    for (unsigned i = 0; i != smp::count; ++i) {
+    ssg0.clients.reserve(this_smp_shard_count());
+    for (unsigned i = 0; i != this_smp_shard_count(); ++i) {
         ssg0.clients.emplace_back(smp_service_group_semaphore::max_counter(), make_service_group_semaphore_exception_factory(0, i, cpu, {"default"}));
     }
 }
@@ -175,7 +169,7 @@ void
 smp::setup_prefaulter(const seastar::resource::resources& res, seastar::memory::internal::numa_layout layout) {
     // Stack guards mprotect() random pages, so the prefaulter will hard-fault.
 #ifndef SEASTAR_THREAD_STACK_GUARDS
-    _prefaulter = std::make_unique<internal::memory_prefaulter>(res, std::move(layout));
+    _prefaulter = std::make_unique<internal::memory_prefaulter>(_alien, res, std::move(layout));
 #endif
 }
 
@@ -199,7 +193,7 @@ get_huge_page_size() {
     return std::nullopt;
 }
 
-internal::memory_prefaulter::memory_prefaulter(const resource::resources& res, memory::internal::numa_layout layout) {
+internal::memory_prefaulter::memory_prefaulter(alien::instance& alien, const resource::resources& res, memory::internal::numa_layout layout) {
     for (auto& range : layout.ranges) {
         _layout_by_node_id[range.numa_node_id].push_back(std::move(range));
     }
@@ -218,17 +212,28 @@ internal::memory_prefaulter::memory_prefaulter(const resource::resources& res, m
             }
             a.set(cpuset);
         }
-        _worker_threads.emplace_back(a, [this, &ranges, page_size, huge_page_size_opt] {
+        _worker_threads.emplace_back(a, [this, &alien, &ranges, page_size, huge_page_size_opt] {
+            ++_active_threads;
             work(ranges, page_size, huge_page_size_opt);
+            if (!--_active_threads) {
+                run_on(alien, 0, [this] () noexcept { join_threads(); });
+            }
         });
     }
 }
 
-internal::memory_prefaulter::~memory_prefaulter() {
-    _stop_request.store(true, std::memory_order_relaxed);
+void
+internal::memory_prefaulter::join_threads() noexcept {
     for (auto& t : _worker_threads) {
         t.join();
     }
+    _worker_threads.clear();
+    _layout_by_node_id.clear();
+}
+
+internal::memory_prefaulter::~memory_prefaulter() {
+    _stop_request.store(true, std::memory_order_relaxed);
+    join_threads();
 }
 
 void

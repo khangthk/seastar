@@ -24,16 +24,12 @@
 #include <seastar/core/resource.hh>
 #include <seastar/core/bitops.hh>
 #include <seastar/util/backtrace.hh>
-#include <seastar/util/modules.hh>
 #include <seastar/util/sampler.hh>
-#ifndef SEASTAR_MODULE
-#include <new>
 #include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <vector>
-#endif
 
 namespace seastar {
 
@@ -131,15 +127,17 @@ namespace memory {
 #define SEASTAR_INTERNAL_ALLOCATOR_PAGE_SIZE 4096
 #endif
 
-static constexpr size_t page_size = SEASTAR_INTERNAL_ALLOCATOR_PAGE_SIZE;
-static constexpr size_t page_bits = log2ceil(page_size);
-static constexpr size_t huge_page_size =
+constexpr inline size_t page_size = SEASTAR_INTERNAL_ALLOCATOR_PAGE_SIZE;
+constexpr inline size_t page_bits = log2ceil(page_size);
+constexpr inline size_t huge_page_size =
 #if defined(__x86_64__) || defined(__i386__) || defined(__s390x__) || defined(__zarch__)
     1 << 21; // 2M
 #elif defined(__aarch64__)
     1 << 21; // 2M
 #elif defined(__PPC__)
     1 << 24; // 16M
+#elif defined(__riscv)
+    1 << 21; // 2M
 #else
 #error "Huge page size is not defined for this architecture"
 #endif
@@ -159,6 +157,10 @@ struct numa_layout {
 
 numa_layout merge(numa_layout one, numa_layout two);
 
+size_t per_shard_memory(size_t total_memory, unsigned nr_shards);
+
+void global_setup(unsigned nr_shards);
+
 }
 
 internal::numa_layout configure(std::vector<resource::memory> m, bool mbind,
@@ -167,14 +169,20 @@ internal::numa_layout configure(std::vector<resource::memory> m, bool mbind,
 
 void configure_minimal();
 
-// A deprecated alias for set_abort_on_allocation_failure(true).
-[[deprecated("use set_abort_on_allocation_failure(true) instead")]]
-void enable_abort_on_allocation_failure();
+namespace internal {
+
+extern thread_local constinit int abort_on_alloc_failure_suppressed;
+
+}
 
 class disable_abort_on_alloc_failure_temporarily {
 public:
-    disable_abort_on_alloc_failure_temporarily();
-    ~disable_abort_on_alloc_failure_temporarily() noexcept;
+    disable_abort_on_alloc_failure_temporarily() {
+        ++internal::abort_on_alloc_failure_suppressed;
+    }
+    ~disable_abort_on_alloc_failure_temporarily() noexcept {
+        --internal::abort_on_alloc_failure_suppressed;
+    }
 };
 
 // Disables heap profiling as long as this object is alive.
@@ -252,7 +260,6 @@ void set_reclaim_hook(
 
 /// \endcond
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /// \brief Set the global state of the abort on allocation failure behavior.
 ///
@@ -290,6 +297,7 @@ class statistics {
     uint64_t _cross_cpu_frees;
     size_t _total_memory;
     size_t _free_memory;
+    uint64_t _total_bytes_allocated;
     uint64_t _reclaims;
     uint64_t _large_allocs;
     uint64_t _failed_allocs;
@@ -299,11 +307,11 @@ class statistics {
     uint64_t _foreign_cross_frees;
 private:
     statistics(uint64_t mallocs, uint64_t frees, uint64_t cross_cpu_frees,
-            uint64_t total_memory, uint64_t free_memory, uint64_t reclaims,
+            uint64_t total_memory, uint64_t free_memory, uint64_t total_bytes_allocated, uint64_t reclaims,
             uint64_t large_allocs, uint64_t failed_allocs,
             uint64_t foreign_mallocs, uint64_t foreign_frees, uint64_t foreign_cross_frees)
         : _mallocs(mallocs), _frees(frees), _cross_cpu_frees(cross_cpu_frees)
-        , _total_memory(total_memory), _free_memory(free_memory), _reclaims(reclaims)
+        , _total_memory(total_memory), _free_memory(free_memory), _total_bytes_allocated(total_bytes_allocated), _reclaims(reclaims)
         , _large_allocs(large_allocs), _failed_allocs(failed_allocs)
         , _foreign_mallocs(foreign_mallocs), _foreign_frees(foreign_frees)
         , _foreign_cross_frees(foreign_cross_frees) {}
@@ -323,6 +331,8 @@ public:
     size_t allocated_memory() const { return _total_memory - _free_memory; }
     /// Total memory (in bytes)
     size_t total_memory() const { return _total_memory; }
+    /// Total number of bytes allocated since the system was started.
+    uint64_t total_bytes_allocated() const { return _total_bytes_allocated; }
     /// Number of reclaims performed due to low memory
     uint64_t reclaims() const { return _reclaims; }
     /// Number of allocations which violated the large allocation threshold
@@ -498,7 +508,6 @@ public:
     ~scoped_heap_profiling();
 };
 
-SEASTAR_MODULE_EXPORT_END
 
 }
 }

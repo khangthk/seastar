@@ -18,6 +18,11 @@ on:
         description: 'build mode (debug, dev or release)'
         type: string
         required: true
+      arch:
+        description: "runner architecture: x86 or arm"
+        type: string
+        default: x86
+        required: false
       enables:
         description: 'the --enable-* option passed to configure.py'
         type: string
@@ -33,71 +38,61 @@ on:
         type: string
         default: ''
         required: false
+      test-args:
+        description: 'additional arguments passed to test.py'
+        type: string
+        default: ''
+        required: false
 
 jobs:
   test:
-    timeout-minutes: 40
-    runs-on: ubuntu-latest
-    container: fedora:40
+    timeout-minutes: 60
+    runs-on: ${{ inputs.arch == 'arm' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container:
+      image: ubuntu:26.04
     steps:
-      - name: Install Git
+      - name: Show parameters
         run: |
-          sudo dnf -y install git
+          echo "compiler=${{ inputs.compiler }} standard=${{ inputs.standard }} mode=${{ inputs.mode }} enable-ccache=${{ inputs.enable-ccache }}"
+          echo "enables=${{ inputs.enables }}"
+          echo "options=${{ inputs.options }}"
+          echo "test-args=${{ inputs.test-args }}"
 
-      - uses: actions/checkout@v4
+      - name: Install git for checkout
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           submodules: "${{ contains(inputs.enables, 'dpdk') }}"
 
-      - name: Install build dependencies
-        run: |
-          sudo ./install-dependencies.sh
-
-      - name: Install clang++
-        if: ${{ inputs.compiler == 'clang++' }}
-        run: |
-          sudo dnf -y install clang
-
-      - name: Install clang-scan-deps
-        if: ${{ contains(inputs.enables, 'cxx-modules') }}
-        run: |
-          sudo dnf -y install clang-tools-extra
-
-      - name: Install ccache
-        if: ${{ inputs.enable-ccache }}
-        run: |
-          sudo dnf -y install ccache
-
       - name: Setup ccache
         if: ${{ inputs.enable-ccache }}
-        uses: hendrikmuhs/ccache-action@v1
+        uses: hendrikmuhs/ccache-action@d62db5f07c26379fc4b4e0916f098a92573c3b03 # v1.2.23
         with:
           key: ${{ inputs.compiler }}-${{ inputs.standard }}-${{ inputs.mode }}-${{ inputs.enables }}
 
-      - name: Configure
-        run: |
-          if [ ${{ inputs.compiler }} = "clang++" ]; then
-            CC=clang
-          else
-            CC=gcc
-          fi
-          if ${{ inputs.enable-ccache }}; then
-            MAYBE_CCACHE_OPT="--ccache"
-          fi
-          ./configure.py                          \
-            --c++-standard ${{ inputs.standard }} \
-            --compiler ${{ inputs.compiler }}     \
-            --c-compiler $CC                      \
-            --mode ${{ inputs.mode }}             \
-            $MAYBE_CCACHE_OPT                     \
-            ${{ inputs.options }}                 \
-            ${{ inputs.enables }}
+      - name: Install build environment
+        env:
+          COMPILER: ${{ inputs.compiler }}
+          ENABLES: ${{ inputs.enables }}
+          STANDARD: ${{ inputs.standard }}
+          MODE: ${{ inputs.mode }}
+          OPTIONS: ${{ inputs.options }}
+          ENABLE_CCACHE: ${{ inputs.enable-ccache }}
+        run: .github/workflows/install-build-env.sh
 
       - name: Build
         run: cmake --build build/${{inputs.mode}}
 
       - name: Check Header
-        if: ${{ inputs.mode == 'dev' && inputs.compiler == 'clang++' }}
+        if: ${{ inputs.mode == 'dev' && startsWith(inputs.compiler, 'clang++') }}
         run: cmake --build build/${{ inputs.mode }} --target checkheaders
+
+      - name: Check Include Style
+        if: ${{ inputs.mode == 'dev' && startsWith(inputs.compiler, 'clang++') }}
+        run: cmake --build build/${{ inputs.mode }} --target check-include-style
 
       - name: Build with C++20 modules
         if: ${{ contains(inputs.enables, 'cxx-modules') }}
@@ -105,4 +100,4 @@ jobs:
 
       - name: Test
         if: ${{ ! contains(inputs.enables, 'cxx-modules') }}
-        run: ./test.py --mode=${{ inputs.mode }}
+        run: ./test.py --mode=${{ inputs.mode }} ${{ inputs.test-args }}

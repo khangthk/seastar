@@ -20,24 +20,16 @@
  * Copyright (C) 2018 Red Hat
  */
 
-#ifdef SEASTAR_MODULE
-module;
-#endif
 
-#include <compare>
 #include <atomic>
 #include <iterator>
 #include <memory>
 #include <vector>
 
-#ifdef SEASTAR_MODULE
-module seastar;
-#else
 #include <seastar/core/alien.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prefetch.hh>
-#endif
 
 namespace seastar {
 namespace alien {
@@ -125,15 +117,19 @@ void message_queue::start() {
 }
 
 
+static constexpr std::align_val_t message_queue_alignment{alignof(alien::message_queue)};
+
 void internal::qs_deleter::operator()(alien::message_queue* qs) const {
     for (unsigned i = 0; i < count; i++) {
         qs[i].~message_queue();
     }
-    ::operator delete[](qs);
+    ::operator delete[](qs, message_queue_alignment);
 }
 
 instance::qs instance::create_qs(const std::vector<reactor*>& reactors) {
-    auto queues = reinterpret_cast<alien::message_queue*>(operator new[] (sizeof(alien::message_queue) * reactors.size()));
+    auto queues = reinterpret_cast<alien::message_queue*>(
+            operator new[](sizeof(alien::message_queue) * reactors.size(),
+                           message_queue_alignment));
     for (unsigned i = 0; i < reactors.size(); i++) {
         new (&queues[i]) alien::message_queue(reactors[i]);
     }

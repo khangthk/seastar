@@ -34,7 +34,6 @@
 #include <seastar/core/when_all.hh>
 #include <seastar/core/when_any.hh>
 #include <seastar/core/with_timeout.hh>
-#include <boost/range/irange.hpp>
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -89,7 +88,7 @@ SEASTAR_THREAD_TEST_CASE(test_condition_variable_pred) {
     }
     // should not affect outcome.
     cv.signal();
-    
+
     try {
         cv.wait(100ms, [&] { return ready; }).get();
         BOOST_FAIL("should not reach");

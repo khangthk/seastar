@@ -22,15 +22,12 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <seastar/core/future.hh>
 #include <seastar/core/abortable_fifo.hh>
 #include <seastar/core/abort_on_expiry.hh>
 #include <seastar/core/timed_out_error.hh>
-#include <seastar/util/modules.hh>
 #include <exception>
 #include <optional>
-#endif
 
 namespace seastar {
 
@@ -204,7 +201,7 @@ private:
             } else if (_original_future.failed()) {
                 return future_type(exception_future_marker(), std::exception_ptr(_original_future._state.get_exception()));
             } else {
-                return future_type(ready_future_marker(), _original_future._state.get_value());
+                return future_type(set_ready_future_marker(), _original_future._state.get_value());
             }
         }
 
@@ -230,7 +227,7 @@ private:
             } else if (_original_future.failed()) {
                 return future_type(exception_future_marker(), std::exception_ptr(_original_future._state.get_exception()));
             } else {
-                return future_type(ready_future_marker(), _original_future._state.get_value());
+                return future_type(set_ready_future_marker(), _original_future._state.get_value());
             }
         }
 
@@ -314,7 +311,6 @@ public:
 /// When the shared_promise is made ready, every waiter is also made ready.
 ///
 /// Like the shared_future, the types in the parameter pack T must all be copy-constructible.
-SEASTAR_MODULE_EXPORT
 template <typename... T>
 class shared_promise {
 public:

@@ -27,7 +27,7 @@ list (APPEND CMAKE_MODULE_PATH
   ${CMAKE_CURRENT_BINARY_DIR})
 
 cmake_policy (SET CMP0090 NEW)
-foreach (policy CMP0127 CMP0135)
+foreach (policy CMP0127 CMP0135 CMP0167)
   if (POLICY ${policy})
     cmake_policy (SET ${policy} NEW)
   endif ()
@@ -67,13 +67,13 @@ option (Seastar_SSTRING
 
 option (Seastar_DEPRECATED_OSTREAM_FORMATTERS
   "Enable operator<< for formatting standard library containers, which will be deprecated in future"
-  ON)
+  OFF)
 
 set (Seastar_API_LEVEL
-  "7"
+  "9"
   CACHE
   STRING
-  "Seastar compatibility API level (7=unified CPU/IO scheduling groups")
+  "Seastar compatibility API level (7=unified CPU/IO scheduling groups, 8=noncopyable function in json_return_type, 9=new sink API")
 
 set_property (CACHE Seastar_API_LEVEL
   PROPERTY
@@ -145,7 +145,7 @@ set (CMAKE_CXX_FLAGS_SANITIZE
   FORCE)
 
 set (CMAKE_CXX_STANDARD
-  "23"
+  "26"
   CACHE
   STRING
   "C++ standard to build with.")
@@ -182,11 +182,45 @@ mark_as_advanced (
     CMAKE_EXE_LINKER_FLAGS_SANITIZE
     CMAKE_SHARED_LINKER_FLAGS_SANITIZE)
 
+set (CMAKE_CXX_FLAGS_FUZZ
+  "-O1 -g"
+  CACHE
+  STRING
+  "Flags used by the C++ compiler during fuzz builds."
+  FORCE)
+
+set (CMAKE_C_FLAGS_FUZZ
+  "-O1 -g"
+  CACHE
+  STRING
+  "Flags used by the C compiler during fuzz builds."
+  FORCE)
+
+set (CMAKE_EXE_LINKER_FLAGS_FUZZ
+  ""
+  CACHE
+  STRING
+  "Flags used for linking binaries during fuzz builds."
+  FORCE)
+
+set (CMAKE_SHARED_LINKER_FLAGS_FUZZ
+  ""
+  CACHE
+  STRING
+  "Flags used by the shared libraries linker during fuzz builds."
+  FORCE)
+
+mark_as_advanced (
+    CMAKE_CXX_FLAGS_FUZZ
+    CMAKE_C_FLAGS_FUZZ
+    CMAKE_EXE_LINKER_FLAGS_FUZZ
+    CMAKE_SHARED_LINKER_FLAGS_FUZZ)
+
 set (CMAKE_BUILD_TYPE
   "${CMAKE_BUILD_TYPE}"
   CACHE
   STRING
-  "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel Dev Sanitize."
+  "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel Dev Sanitize Fuzz."
   FORCE)
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -228,6 +262,12 @@ set (Seastar_CXX_FLAGS
   STRING
   "Semicolon-separated list of extra compilation flags for Seastar itself.")
 
+set (Seastar_SOURCE_SUBDIR
+  ""
+  CACHE
+  STRING
+  "When non-empty, add -ffile-prefix-map rules so that gdb can resolve Seastar sources. Set to the path of the Seastar source tree relative to the consumer project root (e.g. 'seastar/'). The rules map CMAKE_CURRENT_BINARY_DIR to '.' and paths under it to this subdir, and are appended after Seastar_CXX_FLAGS so they take precedence over any broader -ffile-prefix-map rule.")
+
 option (Seastar_DEMOS
   "Enable demonstration targets."
   ${Seastar_MASTER_PROJECT})
@@ -260,11 +300,13 @@ option (Seastar_HWLOC
   "Enable hwloc support."
   ON)
 
-if (DEFINED Seastar_IO_URING)
-  option (Seastar_IO_URING
-    "Enable io_uring support."
-    ON)
-endif ()
+option (Seastar_LTTNG
+  "Enable LTTng-UST tracepoint support for IO tracing."
+  ON)
+
+option (Seastar_IO_URING
+  "Enable io_uring support."
+  ON)
 
 set (Seastar_JENKINS
   ""
@@ -281,10 +323,6 @@ set (Seastar_LD_FLAGS
 option (Seastar_INSTALL
   "Install targets."
   ${Seastar_MASTER_PROJECT})
-
-option (Seastar_NUMA
-  "Enable NUMA support."
-  ON)
 
 option (Seastar_TESTING
   "Enable testing targets."
@@ -320,77 +358,11 @@ set (Seastar_TEST_TIMEOUT
 option (BUILD_SHARED_LIBS
   "Build seastar library as shared libraries instead of static"
   OFF)
-cmake_dependent_option (Seastar_BUILD_SHARED_LIBS
-  "Build Seastar as shared libraries" OFF
-  "NOT DEFINED BUILD_SHARED_LIB" OFF)
-cmake_dependent_option (Seastar_BUILD_STATIC_LIBS
-  "Build Seastar as static libraries" ON
-  "NOT DEFINED BUILD_SHARED_LIB" OFF)
-if (NOT (Seastar_BUILD_SHARED_LIBS OR Seastar_BUILD_STATIC_LIBS))
-  message (FATAL_ERROR "Seastar_BUILD_STATIC_LIBS and Seastar_BUILD_STATIC_LIBS cannot both be disabled")
-endif ()
-
-function (seastar_add_library name objects)
-  if (Seastar_BUILD_STATIC_LIBS)
-    list (APPEND types static)
-  endif ()
-  if (Seastar_BUILD_SHARED_LIBS)
-    list (APPEND types shared)
-  endif ()
-
-  foreach (type ${types})
-    string (TOUPPER ${type} TYPE)
-    set (fullname ${name}-${type})
-    add_library (${fullname} ${TYPE} $<TARGET_OBJECTS:${objects}>)
-    list (APPEND seastar-libraries ${fullname})
-
-    set_target_properties (${fullname} PROPERTIES
-      OUTPUT_NAME "${name}")
-    # add_library() does not populate the property of the included sources
-    # to the library target being added, so we need to do this manually.
-    foreach (property
-        INTERFACE_COMPILE_DEFINITIONS
-        INTERFACE_COMPILE_FEATURES
-        INTERFACE_COMPILE_OPTIONS
-        INTERFACE_INCLUDE_DIRECTORIES
-        INTERFACE_LINK_LIBRARIES
-        LINK_LIBRARIES)
-      get_target_property (value ${objects} ${property})
-      if (value)
-        set_target_properties (${fullname}
-          PROPERTIES ${property} "${value}")
-      endif ()
-    endforeach ()
-
-    add_library (Seastar::${fullname} ALIAS ${fullname})
-
-    # make sure ${name} and Seastar:${name} always exist, and we prefer
-    # the libraries if they are available.
-    if (NOT TARGET ${name})
-      add_library (${name} ALIAS ${fullname})
-      add_library (Seastar::${name} ALIAS ${fullname})
-    endif ()
-  endforeach (type ${types})
-
-  set (seastar-libraries ${seastar-libraries} PARENT_SCOPE)
-endfunction ()
-
 # We set the following environment variables
 # * ASAN_OPTIONS=disable_coredump=0:abort_on_error=1:detect_stack_use_after_return=1:verify_asan_link_order=0
 #   By default ASan disables core dumps because they used to be
 #   huge. This is no longer the case since the shadow memory is
 #   excluded, so it is safe to enable them.
-#   Also, by default, to make sure it works as expected, ASan
-#   verifies if the ASan dynamic runtime is the first DSO in the
-#   initial library list by calling dl_iterate_phdr(3). But
-#   Seastar provides this symbol, and its implementation references
-#   some static variables. So if Seastar is built as a shared
-#   library, this causes a chicken and egg problem. In other words,
-#   ASan is loaded first, and it tries to reference a symbol which
-#   is in turn provided by another shared library which does not
-#   necessarily ready its static variables yet. And this leads
-#   to a segfault. So, we have to disable this check when
-#   "BUILD_SHARED_LIBS" is enabled.
 # * UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1
 #   Fail the test if any undefined behavior is found and use abort
 #   instead of exit. Using abort is what causes core dumps to be
@@ -405,10 +377,6 @@ if ((NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")) OR
     (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 10.2))
   string (APPEND Seastar_ASAN_OPTIONS ":detect_stack_use_after_return=1")
 endif ()
-if (BUILD_SHARED_LIBS)
-  string (APPEND Seastar_ASAN_OPTIONS ":verify_asan_link_order=0")
-endif ()
-
 
 set (Seastar_TEST_ENVIRONMENT
   "ASAN_OPTIONS=${Seastar_ASAN_OPTIONS};UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1;BOOST_TEST_CATCH_SYSTEM_ERRORS=no"
@@ -461,7 +429,7 @@ find_package (Valgrind REQUIRED)
 
 cmake_dependent_option (Seastar_LOGGER_COMPILE_TIME_FMT
   "Enable the compile-time {fmt} check when formatting logging messages" ON
-  "fmt_VERSION VERSION_GREATER_EQUAL 8.0.0" OFF)
+  "fmt_VERSION VERSION_GREATER_EQUAL 9.0.0" OFF)
 
 #
 # Code generation helpers.
@@ -500,7 +468,8 @@ function (seastar_generate_ragel)
     OUTPUT ${args_OUT_FILE}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${out_dir}
     COMMAND ${ragel_RAGEL_EXECUTABLE} -G2 -o ${args_OUT_FILE} ${args_IN_FILE}
-    COMMAND sed -i -e "'1h;2,$$H;$$!d;g'" -re "'s/static const char _nfa[^;]*;//g'" ${args_OUT_FILE})
+    COMMAND sed -i -e "'1h;2,$$H;$$!d;g'" -re "'s/static const char _nfa[^;]*;//g'" ${args_OUT_FILE}
+    COMMAND touch ${args_OUT_FILE} -r ${args_IN_FILE})
 
   add_custom_target (${args_TARGET}
     DEPENDS ${args_OUT_FILE})
@@ -560,7 +529,14 @@ seastar_generate_protobuf (
   IN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/src/proto/metrics2.proto
   OUT_DIR ${Seastar_GEN_BINARY_DIR}/src/proto)
 
-add_library (seastar-objects OBJECT
+set_option_if_package_is_found (Seastar_GNUTLS GnuTLS)
+set_option_if_package_is_found (Seastar_OPENSSL OpenSSL)
+
+if (NOT Seastar_GNUTLS AND NOT Seastar_OPENSSL)
+  message (FATAL_ERROR "At least one TLS/crypto backend is required. Install GnuTLS or OpenSSL development packages.")
+endif ()
+
+add_library (seastar
   ${http_chunk_parsers_file}
   ${http_request_parser_file}
   ${proto_metrics2_files}
@@ -570,7 +546,6 @@ add_library (seastar-objects OBJECT
   include/seastar/core/align.hh
   include/seastar/core/aligned_buffer.hh
   include/seastar/core/app-template.hh
-  include/seastar/core/array_map.hh
   include/seastar/core/bitops.hh
   include/seastar/core/bitset-iter.hh
   include/seastar/core/byteorder.hh
@@ -581,6 +556,7 @@ add_library (seastar-objects OBJECT
   include/seastar/core/circular_buffer_fixed_capacity.hh
   include/seastar/core/condition-variable.hh
   include/seastar/core/deleter.hh
+  include/seastar/core/disk_params.hh
   include/seastar/core/distributed.hh
   include/seastar/core/do_with.hh
   include/seastar/core/dpdk_rte.hh
@@ -601,7 +577,6 @@ add_library (seastar-objects OBJECT
   include/seastar/core/iostream.hh
   include/seastar/util/later.hh
   include/seastar/core/layered_file.hh
-  include/seastar/core/linux-aio.hh
   include/seastar/core/loop.hh
   include/seastar/core/lowres_clock.hh
   include/seastar/core/manual_clock.hh
@@ -628,6 +603,7 @@ add_library (seastar-objects OBJECT
   include/seastar/core/scollectd.hh
   include/seastar/core/scollectd_api.hh
   include/seastar/core/seastar.hh
+  include/seastar/core/smp.hh
   include/seastar/core/semaphore.hh
   include/seastar/core/shard_id.hh
   include/seastar/core/sharded.hh
@@ -643,7 +619,6 @@ add_library (seastar-objects OBJECT
   include/seastar/core/sstring.hh
   include/seastar/core/stall_sampler.hh
   include/seastar/core/stream.hh
-  include/seastar/core/systemwide_memory_barrier.hh
   include/seastar/core/task.hh
   include/seastar/core/temporary_buffer.hh
   include/seastar/core/thread.hh
@@ -674,9 +649,9 @@ add_library (seastar-objects OBJECT
   include/seastar/http/reply.hh
   include/seastar/http/request.hh
   include/seastar/http/routes.hh
-  include/seastar/http/short_streams.hh
   include/seastar/http/transformers.hh
   include/seastar/http/client.hh
+  include/seastar/core/internal/md5.hh
   include/seastar/json/formatter.hh
   include/seastar/json/json_elements.hh
   include/seastar/net/api.hh
@@ -716,7 +691,6 @@ add_library (seastar-objects OBJECT
   include/seastar/rpc/rpc_types.hh
   include/seastar/util/alloc_failure_injector.hh
   include/seastar/util/backtrace.hh
-  include/seastar/util/concepts.hh
   include/seastar/util/bool_class.hh
   include/seastar/util/conversions.hh
   include/seastar/util/defer.hh
@@ -741,8 +715,9 @@ add_library (seastar-objects OBJECT
   include/seastar/util/tuple_utils.hh
   include/seastar/util/variant_utils.hh
   include/seastar/util/closeable.hh
-  include/seastar/util/source_location-compat.hh
   include/seastar/util/short_streams.hh
+  include/seastar/websocket/client.hh
+  include/seastar/websocket/common.hh
   include/seastar/websocket/server.hh
   src/core/alien.cc
   src/core/file.cc
@@ -750,6 +725,7 @@ add_library (seastar-objects OBJECT
   src/core/reactor_backend.cc
   src/core/thread_pool.cc
   src/core/app-template.cc
+  src/core/disk_params.cc
   src/core/dpdk_rte.cc
   src/core/exception_hacks.cc
   src/core/execution_stage.cc
@@ -781,6 +757,7 @@ add_library (seastar-objects OBJECT
   src/core/io_queue.cc
   src/core/semaphore.cc
   src/core/condition-variable.cc
+  src/core/crypto.cc
   src/http/api_docs.cc
   src/http/common.cc
   src/http/file_handler.cc
@@ -794,6 +771,7 @@ add_library (seastar-objects OBJECT
   src/http/url.cc
   src/http/client.cc
   src/http/request.cc
+  src/http/retry_strategy.cc
   src/json/formatter.cc
   src/json/json_elements.cc
   src/net/arp.cc
@@ -814,7 +792,7 @@ add_library (seastar-objects OBJECT
   src/net/socket_address.cc
   src/net/stack.cc
   src/net/tcp.cc
-  src/net/tls.cc
+  src/net/tls-impl.cc
   src/net/udp.cc
   src/net/unix_address.cc
   src/net/virtio.cc
@@ -822,6 +800,7 @@ add_library (seastar-objects OBJECT
   src/rpc/lz4_fragmented_compressor.cc
   src/rpc/rpc.cc
   src/util/alloc_failure_injector.cc
+  src/util/assert.cc
   src/util/backtrace.cc
   src/util/conversions.cc
   src/util/exceptions.cc
@@ -832,20 +811,54 @@ add_library (seastar-objects OBJECT
   src/util/read_first_line.cc
   src/util/tmp_file.cc
   src/util/short_streams.cc
+  src/util/build_id.cc
+  src/websocket/parser.cc
+  src/websocket/common.cc
+  src/websocket/client.cc
   src/websocket/server.cc
   )
 
-# We disable _FORTIFY_SOURCE because it generates false positives with longjmp() (src/core/thread.cc)
-set_source_files_properties(src/core/thread.cc
-  PROPERTIES COMPILE_FLAGS -U_FORTIFY_SOURCE)
+if (Seastar_GNUTLS)
+  target_sources(seastar
+    PRIVATE
+      src/net/tls_gnutls.cc
+      src/core/crypto_gnutls.cc
+  )
+endif ()
 
-add_dependencies (seastar-objects
+if (Seastar_OPENSSL)
+  target_sources(seastar
+    PRIVATE
+      src/net/tls_openssl.cc
+      src/core/crypto_openssl.cc
+  )
+endif ()
+
+if (Seastar_MODULE)
+  target_sources(seastar
+    PUBLIC
+      FILE_SET CXX_MODULES
+      TYPE CXX_MODULES
+      FILES
+        src/seastar.cppm
+  )
+  # CMake passes both --precompile and -c when building BMIs with Clang;
+  # --precompile supersedes -c, making it unused and triggering
+  # -Wunused-command-line-argument.  Remove -Werror for module interface
+  # units so that the spurious warning does not become a hard error.
+  # see https://gitlab.kitware.com/cmake/cmake/-/work_items/27794
+  set_source_files_properties(src/seastar.cppm PROPERTIES COMPILE_OPTIONS "-Wno-error=unused-command-line-argument")
+endif ()
+
+add_library (Seastar::seastar ALIAS seastar)
+
+add_dependencies (seastar
   seastar_http_chunk_parsers
   seastar_http_request_parser
   seastar_http_response_parser
   seastar_proto_metrics2)
 
-target_include_directories (seastar-objects
+target_include_directories (seastar
   PUBLIC
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -856,7 +869,6 @@ target_include_directories (seastar-objects
 
 set (Seastar_PRIVATE_CXX_FLAGS
   -fno-semantic-interposition
-  -UNDEBUG
   -Wall
   -Werror
   -Wimplicit-fallthrough
@@ -878,12 +890,12 @@ endif ()
 if (CMAKE_CXX_STANDARD GREATER_EQUAL 23)
   include (CheckP2582R1)
   if (Cxx_Compiler_IMPLEMENTS_P2581R1)
-    target_compile_definitions (seastar-objects
+    target_compile_definitions (seastar
       PUBLIC SEASTAR_P2581R1)
   endif ()
 endif ()
 
-if (BUILD_SHARED_LIBS OR Seastar_BUILD_SHARED_LIBS)
+if (BUILD_SHARED_LIBS)
   # use initial-exec TLS, as it puts the TLS variables in the static TLS space
   # instead of allocating them using malloc. otherwise intercepting mallocs and
   # friends could lead to recursive call of malloc functions when a dlopen'ed
@@ -902,18 +914,15 @@ if (Seastar_COMPRESS_DEBUG)
   list (APPEND Seastar_PRIVATE_CXX_FLAGS -gz)
 endif ()
 
-target_link_libraries (seastar-objects
+target_link_libraries (seastar
   PUBLIC
     Boost::boost
     Boost::program_options
-    Boost::thread
     c-ares::cares
     fmt::fmt
     lz4::lz4
-    SourceLocation::source_location
   PRIVATE
     ${CMAKE_DL_LIBS}
-    GnuTLS::gnutls
     StdAtomic::atomic
     lksctp-tools::lksctp-tools
     protobuf::libprotobuf
@@ -922,34 +931,42 @@ target_link_libraries (seastar-objects
     yaml-cpp::yaml-cpp
     Threads::Threads)
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.26)
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PRIVATE
       "$<BUILD_LOCAL_INTERFACE:Valgrind::valgrind>")
 else ()
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PRIVATE
       "$<BUILD_INTERFACE:Valgrind::valgrind>")
 endif ()
 
 if (Seastar_DPDK)
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PRIVATE
       DPDK::dpdk)
 endif ()
 
 include (TriStateOption)
 tri_state_option (${Seastar_SANITIZE}
-  DEFAULT_BUILD_TYPES "Debug" "Sanitize"
+  DEFAULT_BUILD_TYPES "Debug" "Sanitize" "Fuzz"
   CONDITION condition)
 if (condition)
   if (NOT Sanitizers_FOUND)
     message (FATAL_ERROR "Sanitizers not found!")
   endif ()
   set (Seastar_Sanitizers_OPTIONS ${Sanitizers_COMPILE_OPTIONS})
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PUBLIC
       $<${condition}:Sanitizers::address>
-      $<${condition}:Sanitizers::undefined_behavior>)
+      $<${condition}:Sanitizers::undefined_behavior>
+      $<${condition}:Sanitizers::vptr>)
+endif ()
+
+# Link with fuzzer instrumentation for Fuzz builds
+if (CMAKE_BUILD_TYPE STREQUAL "Fuzz")
+  find_package (Sanitizers REQUIRED COMPONENTS fuzzer)
+  target_link_libraries (seastar
+    PUBLIC Sanitizers::fuzzer)
 endif ()
 
 # We only need valgrind to find uninitialized memory uses, so disable
@@ -959,27 +976,22 @@ set( MEMORYCHECK_COMMAND_OPTIONS "--error-exitcode=1 --leak-check=no --trace-chi
 include (CTest)
 
 #
-# We want asserts enabled on all modes, but cmake defaults to passing
-# -DNDEBUG in some modes. We add -UNDEBUG to our private options to
-# reenable it. To force asserts off pass -DNDEBUG in
-# Seastar_CXX_FLAGS.
-#
 # To disable -Werror, pass -Wno-error to Seastar_CXX_FLAGS.
 #
 
-target_compile_definitions(seastar-objects
+target_compile_definitions(seastar
   PUBLIC
   SEASTAR_API_LEVEL=${Seastar_API_LEVEL}
   $<$<BOOL:${BUILD_SHARED_LIBS}>:SEASTAR_BUILD_SHARED_LIBS>)
 
-target_compile_features(seastar-objects
+target_compile_features(seastar
   PUBLIC
     cxx_std_${CMAKE_CXX_STANDARD})
 
 include (CheckCXXCompilerFlag)
 check_cxx_compiler_flag ("-Wno-maybe-uninitialized -Werror" MaybeUninitialized_FOUND)
 if (MaybeUninitialized_FOUND)
-  target_compile_options (seastar-objects
+  target_compile_options (seastar
     PUBLIC
       # With std::experimental::optional it is easy to hit
       # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88897.  We disable
@@ -989,19 +1001,19 @@ if (MaybeUninitialized_FOUND)
 endif ()
 
 if (Seastar_SSTRING)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_SSTRING)
 endif ()
 
 if (Seastar_DEPRECATED_OSTREAM_FORMATTERS)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_DEPRECATED_OSTREAM_FORMATTERS)
 endif ()
 
 if (LinuxMembarrier_FOUND)
   list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAS_MEMBARRIER)
 
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PRIVATE LinuxMembarrier::membarrier)
 endif ()
 
@@ -1009,17 +1021,17 @@ tri_state_option (${Seastar_ALLOC_FAILURE_INJECTION}
   DEFAULT_BUILD_TYPES "Dev"
   CONDITION condition)
 if (condition)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC $<${condition}:SEASTAR_ENABLE_ALLOC_FAILURE_INJECTION>)
 endif ()
 
 if (Seastar_TASK_BACKTRACE)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_TASK_BACKTRACE)
 endif ()
 
 if (Seastar_DEBUG_ALLOCATIONS)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PRIVATE SEASTAR_DEBUG_ALLOCATIONS)
 endif ()
 
@@ -1028,20 +1040,39 @@ if (Sanitizers_FIBER_SUPPORT)
 endif ()
 
 if (Seastar_ALLOC_PAGE_SIZE)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_OVERRIDE_ALLOCATOR_PAGE_SIZE=${Seastar_ALLOC_PAGE_SIZE})
 endif ()
 
 if (Seastar_LOGGER_COMPILE_TIME_FMT)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_LOGGER_COMPILE_TIME_FMT)
 endif ()
 
-target_compile_definitions (seastar-objects
+target_compile_definitions (seastar
   PUBLIC SEASTAR_SCHEDULING_GROUPS_COUNT=${Seastar_SCHEDULING_GROUPS_COUNT})
 
 if (Seastar_CXX_FLAGS)
   list (APPEND Seastar_PRIVATE_CXX_FLAGS ${Seastar_CXX_FLAGS})
+endif ()
+
+# When the consumer specifies Seastar_SOURCE_SUBDIR, add -ffile-prefix-map
+# rules so that gdb can resolve Seastar sources correctly.
+#
+# Without these rules, a broader -ffile-prefix-map=<project_root>=. (typically
+# passed via Seastar_CXX_FLAGS) maps CMAKE_CURRENT_BINARY_DIR to a relative
+# build path (e.g. ./build/dev/seastar).  GDB then concatenates that with the
+# source-relative DW_AT_name and looks for a non-existent path like
+# ./build/dev/seastar/./seastar/src/core/reactor_backend.cc.
+#
+# Rule 1 maps the build dir itself to ".", fixing DW_AT_comp_dir.
+# Rule 2 maps paths *under* the build dir (generated sources) to the subdir.
+# Both rules must appear AFTER Seastar_CXX_FLAGS because both GCC and clang
+# apply the last matching -ffile-prefix-map rule.
+if (Seastar_SOURCE_SUBDIR)
+  list (APPEND Seastar_PRIVATE_CXX_FLAGS
+    -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}=.
+    -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}/=${Seastar_SOURCE_SUBDIR})
 endif ()
 
 # When using split dwarf --gdb-index is effectively required since
@@ -1051,9 +1082,9 @@ endif ()
 # with them and some client code without.
 if (Seastar_SPLIT_DWARF)
   set (Seastar_SPLIT_DWARF_FLAG "-Wl,--gdb-index")
-  target_link_libraries (seastar-objects PUBLIC
+  target_link_libraries (seastar PUBLIC
     $<$<NOT:$<CONFIG:Dev>>:${Seastar_SPLIT_DWARF_FLAG}>)
-  target_compile_options (seastar-objects PUBLIC
+  target_compile_options (seastar PUBLIC
     $<$<NOT:$<CONFIG:Dev>>:-gsplit-dwarf>)
 endif ()
 
@@ -1069,97 +1100,135 @@ if (Seastar_HEAP_PROFILING)
 endif ()
 
 if (Seastar_DEFERRED_ACTION_REQUIRE_NOEXCEPT)
-  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_DEFERRED_ACTION_REQUIRE_NOEXCEPT)
+  target_compile_definitions (seastar
+    PUBLIC SEASTAR_DEFERRED_ACTION_REQUIRE_NOEXCEPT)
 endif ()
 
 if (Seastar_DPDK)
   if (CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64")
-    target_compile_options (seastar-objects
+    target_compile_options (seastar
       PUBLIC
         -mcpu=${Seastar_DPDK_MACHINE}
         -mtune=${Seastar_DPDK_MACHINE})
   else()
-    target_compile_options (seastar-objects
+    target_compile_options (seastar
       PUBLIC
         -march=${Seastar_DPDK_MACHINE})
   endif ()
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC SEASTAR_HAVE_DPDK)
 endif ()
 
 if (Seastar_HWLOC)
   list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_HWLOC)
 
-  target_link_libraries (seastar-objects
+  target_link_libraries (seastar
     PRIVATE hwloc::hwloc)
+endif ()
+
+if (Seastar_GNUTLS)
+  if (NOT GnuTLS_FOUND)
+    message (FATAL_ERROR "Seastar_GNUTLS is enabled but GnuTLS was not found!")
+  endif ()
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_GNUTLS)
+  target_link_libraries (seastar
+    PRIVATE GnuTLS::gnutls)
+endif ()
+
+if (Seastar_OPENSSL)
+  if (NOT OpenSSL_FOUND)
+    message (FATAL_ERROR "Seastar_OPENSSL is enabled but OpenSSL was not found!")
+  endif ()
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_OPENSSL)
+  target_link_libraries (seastar
+    PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif ()
 
 set_option_if_package_is_found (Seastar_IO_URING LibUring)
 if (Seastar_IO_URING)
-  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_URING)
-  target_link_libraries (seastar-objects
-    PRIVATE URING::uring)
+  target_compile_definitions (seastar
+    PUBLIC SEASTAR_HAVE_URING)
+  # Uring include directories are public as seastar includes them in its public headers.
+  # The library is private as seastar uses it internally.
+  target_link_libraries (seastar PRIVATE URING::uring)
+  target_include_directories (seastar
+    SYSTEM PUBLIC $<TARGET_PROPERTY:URING::uring,INTERFACE_INCLUDE_DIRECTORIES>)
 endif ()
 
 if (Seastar_LD_FLAGS)
-  target_link_options (seastar-objects
+  target_link_options (seastar
     PRIVATE ${Seastar_LD_FLAGS})
 endif ()
 
-if (Seastar_NUMA)
-  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_NUMA)
+if (Seastar_LTTNG)
+  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_LTTNG_UST)
 
-  target_link_libraries (seastar-objects
-    PRIVATE numactl::numactl)
-endif ()
+  target_sources (seastar
+    PRIVATE src/core/io_trace.cc
+    PRIVATE src/core/reactor_trace.cc)
 
-if (SystemTap-SDT_FOUND)
-  list (APPEND Seastar_PRIVATE_COMPILE_DEFINITIONS SEASTAR_HAVE_SYSTEMTAP_SDT)
+  target_link_libraries (seastar
+    PRIVATE LTTng::UST)
 
-  target_link_libraries (seastar-objects
-    PRIVATE SystemTap::SDT)
+  # lttng-ust headers contain a VLA whose bound can be zero on aarch64,
+  # which UBSan flags as undefined behaviour.  This is a bug in lttng-ust
+  # itself; suppress the check only for the two compilation units that
+  # instantiate the lttng probe internals, and only on affected platforms.
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    set_source_files_properties (
+      src/core/io_trace.cc
+      src/core/reactor_trace.cc
+      PROPERTIES COMPILE_OPTIONS "-fno-sanitize=vla-bound")
+  endif ()
 endif ()
 
 check_cxx_compiler_flag ("-Werror=unused-result" ErrorUnused_FOUND)
 if (ErrorUnused_FOUND)
   if (Seastar_UNUSED_RESULT_ERROR)
-    target_compile_options (seastar-objects
+    target_compile_options (seastar
       PUBLIC -Werror=unused-result)
   else()
-    target_compile_options (seastar-objects
+    target_compile_options (seastar
       PUBLIC -Wno-error=unused-result)
   endif ()
 endif ()
 
+# clang
 check_cxx_compiler_flag ("-Wno-error=#warnings" ErrorWarnings_FOUND)
 if (ErrorWarnings_FOUND)
-  target_compile_options (seastar-objects
+  target_compile_options (seastar
       PRIVATE "-Wno-error=#warnings")
+endif ()
+# gcc
+check_cxx_compiler_flag ("-Wno-error=cpp" ErrorCpp_FOUND)
+if (ErrorCpp_FOUND)
+  target_compile_options (seastar
+      PRIVATE "-Wno-error=cpp")
 endif ()
 
 foreach (definition
     SEASTAR_DEBUG
     SEASTAR_DEFAULT_ALLOCATOR
     SEASTAR_SHUFFLE_TASK_QUEUE)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC
-      $<$<IN_LIST:$<CONFIG>,Debug;Sanitize>:${definition}>)
+      $<$<IN_LIST:$<CONFIG>,Debug;Sanitize;Fuzz>:${definition}>)
 endforeach ()
 
 tri_state_option (${Seastar_DEBUG_SHARED_PTR}
-  DEFAULT_BUILD_TYPES "Debug" "Sanitize"
+  DEFAULT_BUILD_TYPES "Debug" "Sanitize" "Fuzz"
   CONDITION condition)
 if (condition)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC
       $<${condition}:SEASTAR_DEBUG_SHARED_PTR>)
 endif ()
 
 tri_state_option (${Seastar_DEBUG_SHARED_PTR}
-  DEFAULT_BUILD_TYPES "Debug" "Sanitize"
+  DEFAULT_BUILD_TYPES "Debug" "Sanitize" "Fuzz"
   CONDITION condition)
 if (condition)
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PUBLIC
       $<${condition}:SEASTAR_DEBUG_PROMISE>)
 endif ()
@@ -1167,38 +1236,36 @@ endif ()
 include (CheckLibc)
 
 tri_state_option (${Seastar_STACK_GUARDS}
-  DEFAULT_BUILD_TYPES "Debug" "Sanitize" "Dev"
+  DEFAULT_BUILD_TYPES "Debug" "Sanitize" "Dev" "Fuzz"
   CONDITION condition)
 if (condition)
   # check for -fstack-clash-protection together with -Werror, because
   # otherwise clang can soft-fail (return 0 but emit a warning) instead.
   check_cxx_compiler_flag ("-fstack-clash-protection -Werror" StackClashProtection_FOUND)
   if (StackClashProtection_FOUND)
-    target_compile_options (seastar-objects
+    target_compile_options (seastar
       PUBLIC
         $<${condition}:-fstack-clash-protection>)
   endif ()
-  target_compile_definitions (seastar-objects
+  target_compile_definitions (seastar
     PRIVATE
       $<${condition}:SEASTAR_THREAD_STACK_GUARDS>)
 endif ()
 
-target_compile_definitions (seastar-objects
+target_compile_definitions (seastar
   PUBLIC
     $<$<IN_LIST:$<CONFIG>,Dev;Debug>:SEASTAR_TYPE_ERASE_MORE>)
 
-target_compile_definitions (seastar-objects
+target_compile_definitions (seastar
   PRIVATE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
 
-target_compile_options (seastar-objects
+target_compile_options (seastar
   PRIVATE ${Seastar_PRIVATE_CXX_FLAGS})
 
-set_target_properties (seastar-objects
+set_target_properties (seastar
   PROPERTIES
     CXX_STANDARD ${CMAKE_CXX_STANDARD}
     CXX_EXTENSIONS ON)
-
-seastar_add_library (seastar seastar-objects)
 
 add_library (seastar_private INTERFACE)
 
@@ -1216,7 +1283,7 @@ target_link_libraries (seastar_private
 #
 
 if (Seastar_INSTALL OR Seastar_TESTING)
-  add_library (seastar_testing-objects OBJECT
+  add_library (seastar_testing
     include/seastar/testing/entry_point.hh
     include/seastar/testing/exchanger.hh
     include/seastar/testing/random.hh
@@ -1229,35 +1296,34 @@ if (Seastar_INSTALL OR Seastar_TESTING)
     src/testing/seastar_test.cc
     src/testing/test_runner.cc)
 
-  target_compile_definitions (seastar_testing-objects
+  add_library (Seastar::seastar_testing ALIAS seastar_testing)
+
+  target_compile_definitions (seastar_testing
     PRIVATE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
 
-  target_compile_options (seastar_testing-objects
+  target_compile_options (seastar_testing
     PRIVATE ${Seastar_PRIVATE_CXX_FLAGS})
 
-  target_link_libraries (seastar_testing-objects
+  target_link_libraries (seastar_testing
     PUBLIC
       Boost::unit_test_framework
       Boost::dynamic_linking
       seastar)
 
-  seastar_add_library (seastar_testing seastar_testing-objects)
-
-  add_library(seastar_perf_testing-objects OBJECT
+  add_library(seastar_perf_testing
     src/testing/random.cc
     include/seastar/testing/perf_tests.hh
     tests/perf/perf_tests.cc
     tests/perf/linux_perf_event.cc)
-
-  target_compile_definitions (seastar_perf_testing-objects
+  add_library (Seastar::seastar_perf_testing ALIAS seastar_perf_testing)
+  target_compile_definitions (seastar_perf_testing
     PRIVATE ${Seastar_PRIVATE_COMPILE_DEFINITIONS})
-  target_compile_options (seastar_perf_testing-objects
+  target_compile_options (seastar_perf_testing
     PRIVATE ${Seastar_PRIVATE_CXX_FLAGS})
-  target_link_libraries (seastar_perf_testing-objects
+  target_link_libraries (seastar_perf_testing
     PUBLIC
     seastar)
 
-  seastar_add_library (seastar_perf_testing seastar_perf_testing-objects)
 endif ()
 
 if (Seastar_MODULE)
@@ -1265,7 +1331,6 @@ if (Seastar_MODULE)
     cmake_policy (SET CMP0155 NEW)
   endif ()
   include (CxxModulesRules)
-  add_subdirectory (src)
 endif ()
 
 #
@@ -1322,7 +1387,9 @@ endif ()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Dev")
   include (CheckHeaders)
+  include (CheckIncludeStyle)
   add_custom_target (checkheaders)
+  add_custom_target (check-include-style)
   foreach (lib seastar seastar_testing seastar_perf_testing)
     if (TARGET ${lib})
       seastar_check_self_contained (checkheaders ${lib}
@@ -1330,6 +1397,7 @@ if (CMAKE_BUILD_TYPE STREQUAL "Dev")
         # impl.hh headers are internal implementations of .hh, so they are not
         # compilable. let's exclude them from the files to be checked.
         EXCLUDE "_impl.hh$|-impl.hh$")
+      seastar_check_include_style (check-include-style ${lib})
     endif ()
   endforeach ()
 endif ()
@@ -1424,12 +1492,24 @@ if (Seastar_INSTALL)
     PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/seastar-json2code.py
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-  install (
+  set (seastar_install_targets
     TARGETS
-      ${seastar-libraries}
+      seastar
+      seastar_testing
+      seastar_perf_testing
     EXPORT seastar-export
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+  if (Seastar_MODULE)
+    list (APPEND seastar_install_targets
+      FILE_SET CXX_MODULES
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/cxx/modules"
+      CXX_MODULES_BMI
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cxx/bmi")
+  endif ()
+
+  install (${seastar_install_targets})
 
   install (
     EXPORT seastar-export
@@ -1458,21 +1538,19 @@ if (Seastar_INSTALL)
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindGnuTLS.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLinuxMembarrier.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSanitizers.cmake
-      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSourceLocation.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindStdAtomic.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findc-ares.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Finddpdk.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findhwloc.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findlksctp-tools.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findlz4.cmake
-      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findnumactl.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findragel.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findrt.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Finducontext.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Findyaml-cpp.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/SeastarDependencies.cmake
       ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLibUring.cmake
-      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindSystemTap-SDT.cmake
+      ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindLTTngUST.cmake
     DESTINATION ${install_cmakedir})
 
   install (
@@ -1489,14 +1567,29 @@ if (Seastar_INSTALL)
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
     RENAME seastar-testing.pc)
 
+  if (Seastar_MODULE)
+    install (
+      TARGETS seastar
+      CXX_MODULES_BMI
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cxx/bmi"
+      FILE_SET CXX_MODULES
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/cxx/modules")
+  endif ()
+
   #
   # Export targets from the build tree for the user package registry.
   #
 
-  export (
+  set (export_args
     EXPORT seastar-export
     FILE ${CMAKE_CURRENT_BINARY_DIR}/SeastarTargets.cmake
     NAMESPACE Seastar::)
+
+  if (Seastar_MODULE)
+    list (APPEND export_args CXX_MODULES_DIRECTORY "include/cxx/modules")
+  endif ()
+
+  export (${export_args})
 
   export (PACKAGE Seastar)
 

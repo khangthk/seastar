@@ -21,69 +21,51 @@
 #pragma once
 
 #include <seastar/core/sstring.hh>
-#include <seastar/util/backtrace.hh>
 #include <seastar/util/log-impl.hh>
+#include <seastar/util/log-level.hh>
 #include <seastar/core/lowres_clock.hh>
-#include <seastar/util/std-compat.hh>
-#include <seastar/util/modules.hh>
 
-#ifndef SEASTAR_MODULE
 #include <concepts>
+#include <source_location>
 #include <unordered_map>
 #include <exception>
 #include <iosfwd>
 #include <atomic>
 #include <mutex>
-#include <type_traits>
-#include <boost/lexical_cast.hpp>
 #include <fmt/core.h>
 #include <fmt/format.h>
-#endif
+#include <fmt/std.h>
 
 /// \addtogroup logging
 /// @{
 
-namespace seastar {
-
-SEASTAR_MODULE_EXPORT_BEGIN
-
-/// \brief log level used with \see {logger}
-/// used with the logger.do_log method.
-/// Levels are in increasing order. That is if you want to see debug(3) logs you
-/// will also see error(0), warn(1), info(2).
-///
-enum class log_level {
-    error,
-    warn,
-    info,
-    debug,
-    trace,
-};
-
-std::ostream& operator<<(std::ostream& out, log_level level);
-std::istream& operator>>(std::istream& in, log_level& level);
-
-SEASTAR_MODULE_EXPORT_END
-}
-
-template <>
-struct fmt::formatter<seastar::log_level> {
-    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-    auto format(seastar::log_level level, fmt::format_context& ctx) const -> decltype(ctx.out());
-};
-
-// Boost doesn't auto-deduce the existence of the streaming operators for some reason
-
-namespace boost {
-template<>
-seastar::log_level lexical_cast(const std::string& source);
-
-}
 
 namespace seastar {
-SEASTAR_MODULE_EXPORT_BEGIN
 class logger;
 class logger_registry;
+
+namespace internal {
+
+// Get a format_info's format string as a string_view.
+//
+// fmt 12 deprecates the implicit basic_format_string -> basic_string_view
+// conversion in favour of basic_format_string::get(), which was only added
+// in fmt 10. Keeping the version check in here means the call sites need no
+// #ifdef of their own.
+//
+// The format string is a deduced template parameter so one template serves
+// both the compile-time fmt::format_string<Args...> and the runtime
+// std::string_view without the caller needing to know which is in play.
+template <typename FormatString>
+fmt::string_view format_string_view(const FormatString& format) noexcept {
+#if defined(SEASTAR_LOGGER_COMPILE_TIME_FMT) && FMT_VERSION >= 100000
+    return format.get();
+#else
+    return fmt::string_view(format);
+#endif
+}
+
+} // namespace internal
 
 /// \brief Logger class for ostream or syslog.
 ///
@@ -134,11 +116,9 @@ public:
     struct format_info {
         /// implicitly construct format_info from a constant format string
         /// \param fmt - {fmt} style format string
-        template<
-            typename S,
-            std::enable_if_t<std::is_convertible_v<const S&, std::string_view>, int> = 0>
+        template <std::convertible_to<std::string_view> S>
         FMT_CONSTEVAL inline format_info(const S& format,
-                           compat::source_location loc = compat::source_location::current()) noexcept
+                           std::source_location loc = std::source_location::current()) noexcept
             : format(format)
             , loc(loc)
         {}
@@ -147,7 +127,7 @@ public:
         /// this constructor is used by other printers which print to logger
         /// \param s a format_string
         inline format_info(fmt::format_string<Args...> s,
-                           compat::source_location loc = compat::source_location::current()) noexcept
+                           std::source_location loc = std::source_location::current()) noexcept
             : format(s)
             , loc(loc)
         {}
@@ -157,7 +137,7 @@ public:
         using runtime_format_string_t = fmt::basic_runtime<char>;
 #endif
         inline format_info(runtime_format_string_t s,
-                           compat::source_location loc = compat::source_location::current()) noexcept
+                           std::source_location loc = std::source_location::current()) noexcept
             : format(s)
             , loc(loc)
         {}
@@ -166,7 +146,7 @@ public:
             : format_info("")
         {}
         fmt::format_string<Args...> format;
-        compat::source_location loc;
+        std::source_location loc;
     };
 #ifdef __cpp_lib_type_identity
     template <typename T>
@@ -183,23 +163,23 @@ public:
     struct format_info {
         /// implicitly construct format_info from a const char* format string.
         /// \param fmt - {fmt} style format string
-        format_info(const char* format, compat::source_location loc = compat::source_location::current()) noexcept
+        format_info(const char* format, std::source_location loc = std::source_location::current()) noexcept
             : format(format)
             , loc(loc)
         {}
         /// implicitly construct format_info from a std::string_view format string.
         /// \param fmt - {fmt} style format string_view
-        format_info(std::string_view format, compat::source_location loc = compat::source_location::current()) noexcept
+        format_info(std::string_view format, std::source_location loc = std::source_location::current()) noexcept
             : format(format)
             , loc(loc)
         {}
         /// implicitly construct format_info with no format string.
-        format_info(compat::source_location loc = compat::source_location::current()) noexcept
+        format_info(std::source_location loc = std::source_location::current()) noexcept
             : format()
             , loc(loc)
         {}
         std::string_view format;
-        compat::source_location loc;
+        std::source_location loc;
     };
     // to reduce the number of #ifdefs, let's be compatible with the templated
     // format_info
@@ -213,7 +193,7 @@ private:
     void do_log(log_level level, log_writer& writer);
     void failed_to_log(std::exception_ptr ex,
                        fmt::string_view fmt,
-                       compat::source_location loc) noexcept;
+                       std::source_location loc) noexcept;
 
     class silencer {
     public:
@@ -259,7 +239,6 @@ public:
         uint64_t _dropped_messages = 0;
 
     private:
-        bool check();
         bool has_dropped_messages() const { return bool(_dropped_messages); }
         uint64_t get_and_reset_dropped_messages() {
             return std::exchange(_dropped_messages, 0);
@@ -267,6 +246,12 @@ public:
 
     public:
         explicit rate_limit(std::chrono::milliseconds interval);
+
+    /// Checks, if the rate limit has been already reached. If not - starts the rate limiting interval.
+    /// You should ignore messages if `rate_limited()` returns true and process if it returns false.
+    ///
+    /// \return true if the rate limit has been reached before and is still active, false otherwise.
+        bool rate_limited();
     };
 
 public:
@@ -303,7 +288,7 @@ public:
                 });
                 do_log(level, writer);
             } catch (...) {
-                failed_to_log(std::current_exception(), fmt::string_view(fmt.format), fmt.loc);
+                failed_to_log(std::current_exception(), internal::format_string_view(fmt.format), fmt.loc);
             }
         }
     }
@@ -324,17 +309,17 @@ public:
     ///
     template <typename... Args>
     void log(log_level level, rate_limit& rl, format_info_t<Args...> fmt, Args&&... args) noexcept {
-        if (is_enabled(level) && rl.check()) {
+        if (is_enabled(level) && !rl.rate_limited()) {
             try {
                 lambda_log_writer writer([&] (internal::log_buf::inserter_iterator it) {
                     if (rl.has_dropped_messages()) {
                         it = fmt::format_to(it, "(rate limiting dropped {} similar messages) ", rl.get_and_reset_dropped_messages());
                     }
-                    return fmt::format_to(it, fmt::runtime(fmt.format), std::forward<Args>(args)...);
+                    return fmt::format_to(it, fmt::runtime(internal::format_string_view(fmt.format)), std::forward<Args>(args)...);
                 });
                 do_log(level, writer);
             } catch (...) {
-                failed_to_log(std::current_exception(), fmt::string_view(fmt.format), fmt.loc);
+                failed_to_log(std::current_exception(), internal::format_string_view(fmt.format), fmt.loc);
             }
         }
     }
@@ -350,7 +335,7 @@ public:
     /// buffer directly, avoiding the use of any intermediary buffers.
     /// This is rate-limited version, see \ref rate_limit.
     void log(log_level level, rate_limit& rl, log_writer& writer, format_info_t<> fmt = {}) noexcept {
-        if (is_enabled(level) && rl.check()) {
+        if (is_enabled(level) && !rl.rate_limited()) {
             try {
                 lambda_log_writer writer_wrapper([&] (internal::log_buf::inserter_iterator it) {
                     if (rl.has_dropped_messages()) {
@@ -459,10 +444,6 @@ public:
     /// Also output to ostream. default is true
     static void set_ostream_enabled(bool enabled) noexcept;
 
-    /// Also output to stdout. default is true
-    [[deprecated("Use set_ostream_enabled instead")]]
-    static void set_stdout_enabled(bool enabled) noexcept;
-
     /// Also output to syslog. default is false
     ///
     /// NOTE: syslog() can block, which will stall the reactor thread.
@@ -548,10 +529,6 @@ enum class logger_timestamp_style {
 /// \brief Output stream to use for logging.
 enum class logger_ostream_type {
     none,
-#ifdef SEASTAR_LOGGER_TYPE_STDOUT
-    stdout __attribute__ ((deprecated ("use cout instead"))) = 1,
-    stderr __attribute__ ((deprecated ("use cerr instead"))) = 2,
-#endif
     cout = 1,
     cerr = 2,
 };
@@ -570,7 +547,6 @@ struct logging_settings final {
 ///
 void apply_logging_settings(const logging_settings&);
 
-SEASTAR_MODULE_EXPORT_END
 
 /// \cond internal
 
@@ -587,19 +563,66 @@ public:
 };
 
 /// \endcond
-} // end seastar namespace
+namespace internal {
 
-// Pretty-printer for exceptions to be logged, e.g., std::current_exception().
-namespace std {
-std::ostream& operator<<(std::ostream&, const std::exception_ptr&);
-std::ostream& operator<<(std::ostream&, const std::exception&);
-std::ostream& operator<<(std::ostream&, const std::system_error&);
+/// Wrapper returned by \ref seastar::formattable() that carries a
+/// \c std::exception_ptr to be formatted by {fmt}.
+struct formattable_exception_ptr {
+    std::exception_ptr eptr;
+};
+
 }
 
-#if FMT_VERSION >= 90000
-template <> struct fmt::formatter<std::exception_ptr> : fmt::ostream_formatter {};
-template <> struct fmt::formatter<std::exception> : fmt::ostream_formatter {};
-template <> struct fmt::formatter<std::system_error> : fmt::ostream_formatter {};
+/// Wrap a \c std::exception_ptr so that it can be formatted with {fmt}, e.g.
+/// \c fmt::format("{}", seastar::formattable(eptr)).
+///
+/// The exception is printed as its pretty type name, followed by any extra
+/// detail available for well-known exception types (the \c what() message,
+/// and the error code for \c std::system_error), recursing into nested
+/// exceptions. An empty \c exception_ptr is printed as \c "<no exception>".
+///
+/// \param eptr the exception to format; copied (cheap, refcounted).
+inline internal::formattable_exception_ptr formattable(std::exception_ptr eptr) {
+    return internal::formattable_exception_ptr{std::move(eptr)};
+}
+
+} // end seastar namespace
+
+template <>
+struct fmt::formatter<seastar::internal::formattable_exception_ptr> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const seastar::internal::formattable_exception_ptr&, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
+
+#ifdef SEASTAR_DEPRECATED_OSTREAM_FORMATTERS
+// Pretty-printer for exceptions to be logged, e.g., std::current_exception().
+namespace std {
+[[deprecated("Use {fmt} instead, or disable Seastar_DEPRECATED_OSTREAM_FORMATTERS and implement your own operator<<")]]
+std::ostream& operator<<(std::ostream&, const std::exception_ptr&);
+[[deprecated("Use {fmt} instead, or disable Seastar_DEPRECATED_OSTREAM_FORMATTERS and implement your own operator<<")]]
+std::ostream& operator<<(std::ostream&, const std::exception&);
+[[deprecated("Use {fmt} instead, or disable Seastar_DEPRECATED_OSTREAM_FORMATTERS and implement your own operator<<")]]
+std::ostream& operator<<(std::ostream&, const std::system_error&);
+}
+#endif
+
+#if FMT_VERSION < 120201
+
+// Seastar has no business defining a {fmt} formatter for std::exception_ptr,
+// a type it does not own; that is for the standard library or {fmt} to do (see
+// https://github.com/fmtlib/fmt/issues/4808). Until then we provide one, but
+// deprecate it in favour of seastar::formattable(), which wraps the pointer in
+// a Seastar-owned type. The deprecation is on parse() (which {fmt} odr-uses)
+// rather than on the specialization, so that it is diagnosed at the call site.
+template <>
+struct fmt::formatter<std::exception_ptr> {
+    [[deprecated("Use seastar::formattable(eptr) instead of formatting a std::exception_ptr directly")]]
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const std::exception_ptr& eptr, fmt::format_context& ctx) const -> decltype(ctx.out()) {
+        return fmt::format_to(ctx.out(), "{}", seastar::formattable(eptr));
+    }
+};
+
 #endif
 
 /// @}

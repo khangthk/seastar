@@ -23,8 +23,9 @@
 
 #include <seastar/core/sstring.hh>
 #include <seastar/core/on_internal_error.hh>
-#include <cassert>
+#include <seastar/util/assert.hh>
 #include <cstdint>
+#include <span>
 #include <vector>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -140,6 +141,8 @@ public:
         return req;
     }
 
+    // No copy of iov is made: the returned request points at iov's data(), whose lifetime must extend
+    // until the request is complete.
     static io_request make_readv(int fd, uint64_t pos, std::vector<iovec>& iov, bool nowait_works) {
         io_request req;
         req._readv = {
@@ -212,10 +215,12 @@ public:
         return req;
     }
 
-    static io_request make_writev(int fd, uint64_t pos, std::vector<iovec>& iov, bool nowait_works) {
+    // No copy of iov is made: the returned request points at iov's data(), whose lifetime must extend
+    // until the request is complete.
+    static io_request make_writev(int fd, uint64_t pos, std::span<iovec> iov, bool nowait_works) {
         io_request req;
         req._writev = {
-          .op = operation::writev,  
+          .op = operation::writev,
           .nowait_works = nowait_works,
           .fd = fd,
           .pos = pos,
@@ -318,6 +323,24 @@ public:
     // (chosen arbitrarily) which is allowed by the common-initial-subsequence rule.
     operation opcode() const {
         return _read.op;
+    }
+
+    // The file offset (pos) is at the same position in read_op, readv_op,
+    // write_op, and writev_op, so we access it through _read unconditionally.
+    uint64_t offset() const noexcept {
+        static_assert(offsetof(read_op, pos) == offsetof(readv_op, pos));
+        static_assert(offsetof(read_op, pos) == offsetof(write_op, pos));
+        static_assert(offsetof(read_op, pos) == offsetof(writev_op, pos));
+        return _read.pos;
+    }
+
+    // The file descriptor is at the same position in read_op, readv_op,
+    // write_op, and writev_op, so we access it through _read unconditionally.
+    int fd() const noexcept {
+        static_assert(offsetof(read_op, fd) == offsetof(readv_op, fd));
+        static_assert(offsetof(read_op, fd) == offsetof(write_op, fd));
+        static_assert(offsetof(read_op, fd) == offsetof(writev_op, fd));
+        return _read.fd;
     }
 
     template <operation Op>
@@ -426,7 +449,7 @@ public:
     io_direction_and_length(int idx, size_t val) noexcept
             : _directed_length((val << 1) | idx)
     {
-        assert(idx == read_idx || idx == write_idx);
+        SEASTAR_ASSERT(idx == read_idx || idx == write_idx);
     }
 };
 

@@ -32,6 +32,7 @@
 #include <seastar/core/do_with.hh>
 #include <seastar/net/stack.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/util/assert.hh>
 
 namespace seastar {
 
@@ -54,7 +55,7 @@ public:
     };
 private:
     bool _aborted = false;
-    queue<temporary_buffer<char>> _q{1};
+    queue<temporary_buffer<char>> _q{128};
     loopback_error_injector* _error_injector;
     type _type;
     std::optional<promise<>> _shutdown;
@@ -105,8 +106,16 @@ public:
         }
     }
 
+    // Emulate SHUT_WR: keep already-queued data and append an EOF marker after
+    // it, rather than discarding it the way abort() does.
+    future<> shutdown_output() noexcept {
+        shutdown();
+        // empty buffer = EOF, the same marker the data sink's close() uses
+        return _q.push_eventually(temporary_buffer<char>(0)).handle_exception([] (std::exception_ptr) {});
+    }
+
     future<> wait_input_shutdown() {
-        assert(!_shutdown.has_value());
+        SEASTAR_ASSERT(!_shutdown.has_value());
         _shutdown.emplace();
         return _shutdown->get_future();
     }
@@ -121,8 +130,9 @@ public:
             , _batch_flush_error(std::move(flush_error))
     {
     }
-    future<> put(net::packet data) override {
-        return do_with(data.release(), [this] (std::vector<temporary_buffer<char>>& bufs) {
+private:
+    future<> put(std::vector<temporary_buffer<char>> bufs) {
+        return do_with(std::move(bufs), [this] (std::vector<temporary_buffer<char>>& bufs) {
             return do_for_each(bufs, [this] (temporary_buffer<char>& buf) {
                 return smp::submit_to(_buffer->get_owner_shard(), [this, b = buf.get(), s = buf.size()] {
                     return (*_buffer)->push(temporary_buffer<char>(b, s));
@@ -130,6 +140,17 @@ public:
             });
         });
     }
+public:
+#if SEASTAR_API_LEVEL >= 9
+    future<> put(std::span<temporary_buffer<char>> bufs) override {
+        std::vector<temporary_buffer<char>> stable_bufs(std::make_move_iterator(bufs.begin()), std::make_move_iterator(bufs.end()));
+        return put(std::move(stable_bufs));
+    }
+#else
+    future<> put(net::packet data) override {
+        return put(data.release());
+    }
+#endif
     future<> close() override {
         return smp::submit_to(_buffer->get_owner_shard(), [this] {
             return (*_buffer)->push({}).handle_exception_type([] (std::system_error& err) {
@@ -193,7 +214,7 @@ public:
     }
     void shutdown_output() override {
         (void)smp::submit_to(_tx->get_owner_shard(), [tx = _tx] {
-            (*tx)->abort();
+            return (*tx)->shutdown_output();
         });
     }
     void set_nodelay(bool nodelay) override {
@@ -252,24 +273,32 @@ public:
 class loopback_connection_factory {
     unsigned _shard = 0;
     unsigned _shards_count;
+    unsigned _pending_capacity = 10;
     std::vector<lw_shared_ptr<queue<connected_socket>>> _pending;
 public:
-    explicit loopback_connection_factory(unsigned shards_count = smp::count)
+    explicit loopback_connection_factory(unsigned shards_count = this_smp_shard_count())
             : _shards_count(shards_count)
     {
         _pending.resize(shards_count);
     }
+
+    static loopback_connection_factory with_pending_capacity(unsigned pending_capacity, unsigned shards_count = this_smp_shard_count()) {
+        auto lcf = loopback_connection_factory(shards_count);
+        lcf._pending_capacity = pending_capacity;
+        return lcf;
+    }
+
     server_socket get_server_socket() {
-       assert(this_shard_id() < _shards_count);
+       SEASTAR_ASSERT(this_shard_id() < _shards_count);
        if (!_pending[this_shard_id()]) {
-           _pending[this_shard_id()] = make_lw_shared<queue<connected_socket>>(10);
+           _pending[this_shard_id()] = make_lw_shared<queue<connected_socket>>(_pending_capacity);
        }
        return server_socket(std::make_unique<loopback_server_socket_impl>(_pending[this_shard_id()]));
     }
     future<> make_new_server_connection(foreign_ptr<lw_shared_ptr<loopback_buffer>> b1, lw_shared_ptr<loopback_buffer> b2) {
-        assert(this_shard_id() < _shards_count);
+        SEASTAR_ASSERT(this_shard_id() < _shards_count);
         if (!_pending[this_shard_id()]) {
-            _pending[this_shard_id()] = make_lw_shared<queue<connected_socket>>(10);
+            _pending[this_shard_id()] = make_lw_shared<queue<connected_socket>>(_pending_capacity);
         }
         return _pending[this_shard_id()]->push_eventually(connected_socket(std::make_unique<loopback_connected_socket_impl>(std::move(b1), b2)));
     }
@@ -280,7 +309,7 @@ public:
         return _shard++ % _shards_count;
     }
     void destroy_shard(unsigned shard) {
-        assert(shard < _shards_count);
+        SEASTAR_ASSERT(shard < _shards_count);
         _pending[shard] = nullptr;
     }
     future<> destroy_all_shards() {

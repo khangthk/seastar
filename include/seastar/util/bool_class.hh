@@ -68,25 +68,29 @@ public:
     constexpr explicit bool_class(bool v) noexcept : _value(v) { }
 
     /// Casts a bool_class object to an untyped \c bool.
-    explicit operator bool() const noexcept { return _value; }
+    constexpr explicit operator bool() const noexcept { return _value; }
 
     /// Logical OR.
-    friend bool_class operator||(bool_class x, bool_class y) noexcept {
+    friend constexpr bool_class operator||(bool_class x, bool_class y) noexcept {
         return bool_class(x._value || y._value);
     }
 
     /// Logical AND.
-    friend bool_class operator&&(bool_class x, bool_class y) noexcept {
+    friend constexpr bool_class operator&&(bool_class x, bool_class y) noexcept {
         return bool_class(x._value && y._value);
     }
 
     /// Logical NOT.
-    friend bool_class operator!(bool_class x) noexcept {
+    friend constexpr bool_class operator!(bool_class x) noexcept {
         return bool_class(!x._value);
     }
 
     /// Equal-to and not-equal-to operators.
     friend bool operator==(bool_class x, bool_class y) noexcept = default;
+
+#if __cpp_lib_three_way_comparison
+    auto operator<=>(const bool_class& other) const noexcept = default;
+#endif
 
     /// Prints bool_class value to an output stream.
     friend std::ostream& operator<<(std::ostream& os, bool_class v) {

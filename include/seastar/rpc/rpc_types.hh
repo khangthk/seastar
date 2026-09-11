@@ -21,19 +21,17 @@
 
 #pragma once
 
-#if FMT_VERSION >= 90000
 #include <fmt/ostream.h>
-#endif
 #if FMT_VERSION >= 100000
 #include <fmt/std.h>
 #endif
 
 #include <seastar/net/api.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <stdexcept>
 #include <string>
 #include <any>
-#include <boost/type.hpp>
-#include <seastar/util/std-compat.hh>
+#include <boost/intrusive/slist.hpp>
 #include <seastar/util/variant_utils.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/circular_buffer.hh>
@@ -41,6 +39,7 @@
 #include <seastar/core/lowres_clock.hh>
 #include <boost/functional/hash.hpp>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/semaphore.hh>
 
 namespace seastar {
 
@@ -50,7 +49,7 @@ using rpc_clock_type = lowres_clock;
 
 // used to tag a type for serializers
 template<typename T>
-using type = boost::type<T>;
+using type = std::type_identity<T>;
 
 struct stats {
     using counter_type = uint64_t;
@@ -104,10 +103,22 @@ struct client_info {
     void attach_auxiliary(const sstring& key, T&& object) {
         user_data.emplace(key, std::any(std::forward<T>(object)));
     }
+    // Logs a warning, aborts the connection identified by conn_id and throws
+    // missing_auxiliary_error. Defined out of line because rpc::server is an
+    // incomplete type in this header.
+    [[noreturn]] void report_missing_auxiliary(const sstring& key) const;
+    /// Returns a reference to the auxiliary object attached under \c key.
+    ///
+    /// If nothing was attached under \c key (for example because the verb
+    /// that was supposed to call attach_auxiliary() failed before doing so),
+    /// the connection is aborted and missing_auxiliary_error is thrown.
+    /// Use retrieve_auxiliary_opt() to probe for a key without side effects.
     template <typename T>
     T& retrieve_auxiliary(const sstring& key) {
         auto it = user_data.find(key);
-        assert(it != user_data.end());
+        if (it == user_data.end()) {
+            report_missing_auxiliary(key);
+        }
         return std::any_cast<T&>(it->second);
     }
     template <typename T>
@@ -140,6 +151,7 @@ public:
 class closed_error : public error {
 public:
     closed_error() : error("connection is closed") {}
+    closed_error(const std::string& msg) : error(msg) {}
 };
 
 class timeout_error : public error {
@@ -174,6 +186,13 @@ public:
 };
 
 class remote_verb_error : public error {
+    using error::error;
+};
+
+/// Thrown by client_info::retrieve_auxiliary() when no auxiliary object is
+/// attached under the requested key. The connection is aborted before the
+/// exception is thrown.
+class missing_auxiliary_error : public error {
     using error::error;
 };
 
@@ -249,11 +268,13 @@ struct rcv_buf {
         : size(size), bufs(std::move(bufs)) {};
 };
 
-struct snd_buf {
+struct snd_buf : public boost::intrusive::slist_base_hook<> {
     // Preferred, but not required, chunk size.
     static constexpr size_t chunk_size = 128*1024;
     uint32_t size = 0;
     std::variant<std::vector<temporary_buffer<char>>, temporary_buffer<char>> bufs;
+    // Holds semaphore units to extend backpressure lifetime until snd_buf is destroyed.
+    semaphore_units<> su;
     using iterator = std::vector<temporary_buffer<char>>::iterator;
     snd_buf() {}
     snd_buf(snd_buf&&) noexcept;
@@ -286,7 +307,7 @@ public:
     virtual rcv_buf decompress(rcv_buf data) = 0;
     virtual sstring name() const = 0;
     virtual future<> close() noexcept { return make_ready_future<>(); };
-    
+
     // factory to create compressor for a connection
     class factory {
     public:
@@ -294,7 +315,7 @@ public:
         // return feature string that will be sent as part of protocol negotiation
         virtual const sstring& supported() const = 0;
         // negotiate compress algorithm
-        // send_empty_frame() requests an empty frame to be sent to the peer compressor on the other side of the connection. 
+        // send_empty_frame() requests an empty frame to be sent to the peer compressor on the other side of the connection.
         // By attaching a header to this empty frame, the compressor can communicate somthing to the peer,
         // send_empty_frame() mustn't be called from inside compress() or decompress().
         virtual std::unique_ptr<compressor> negotiate(sstring feature, bool is_server, std::function<future<>()> send_empty_frame) const {
@@ -313,6 +334,12 @@ constexpr size_t max_stream_buffers_memory = 100 * 1024;
 /// \addtogroup rpc
 /// @{
 
+/// \brief The sending end of an rpc stream.
+///
+/// close() must be called, and its future waited for, before the last
+/// reference to a sink goes away, even if the stream has failed.  The
+/// stream's connection is shut down once the \ref source on this connection
+/// has been read to eof or error as well.
 // send data Out...
 template<typename... Out>
 class sink {
@@ -326,8 +353,9 @@ public:
     public:
         virtual ~impl() {};
         virtual future<> operator()(const Out&... args) = 0;
-        virtual future<> close() = 0;
-        virtual future<> flush() = 0;
+        // Failures may be returned as an exceptional future
+        virtual future<> close() noexcept = 0;
+        virtual future<> flush() noexcept = 0;
         friend sink;
     };
 
@@ -339,19 +367,26 @@ public:
     future<> operator()(const Out&... args) {
         return _impl->operator()(args...);
     }
-    future<> close() {
+    // Failures may be returned as an exceptional future
+    future<> close() noexcept {
         return _impl->close();
     }
     // Calling this function makes sure that any data buffered
     // by the stream sink will be flushed to the network.
     // It does not mean the data was received by the corresponding
     // source.
-    future<> flush() {
+    future<> flush() noexcept {
         return _impl->flush();
     }
     connection_id get_id() const;
 };
 
+/// \brief The receiving end of an rpc stream.
+///
+/// There is deliberately no close().  A source is released by reading it until
+/// it yields an unengaged optional (end of stream) or throws, and there is no
+/// other way to do it.  An application that no longer wants the data should
+/// say so at the application level and then drain what is still in flight.
 // receive data In...
 template<typename... In>
 class source {
@@ -432,9 +467,7 @@ struct tuple_element<I, seastar::rpc::tuple<T...>> : tuple_element<I, tuple<T...
 
 }
 
-#if FMT_VERSION >= 90000
 template <> struct fmt::formatter<seastar::rpc::connection_id> : fmt::ostream_formatter {};
-#endif
 
 #if FMT_VERSION < 100000
 // fmt v10 introduced formatter for std::exception

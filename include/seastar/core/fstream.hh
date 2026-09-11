@@ -30,18 +30,17 @@
 // interface to files, while retaining the zero-copy characteristics of
 // seastar files.
 #include <seastar/core/file.hh>
+#include <seastar/core/future.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/posix.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/internal/api-level.hh>
-#include <seastar/util/modules.hh>
 
-#ifndef SEASTAR_MODULE
 #include <cstdint>
-#endif
+#include <filesystem>
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 class file_input_stream_history {
     static constexpr uint64_t window_size = 4 * 1024 * 1024;
@@ -93,6 +92,12 @@ input_stream<char> make_file_input_stream(
 input_stream<char> make_file_input_stream(
         file file, file_input_stream_options = {});
 
+/// Create a data_source for reading the given offset:len range from the file
+data_source make_file_data_source(file, uint64_t offset, uint64_t len, file_input_stream_options);
+
+/// Create a data_source for reading the whole file from start to end
+data_source make_file_data_source(file, file_input_stream_options);
+
 struct file_output_stream_options {
     // For small files, setting preallocation_size can make it impossible for XFS to find
     // an aligned extent. On the other hand, without it, XFS will divide the file into
@@ -127,6 +132,37 @@ future<output_stream<char>> make_file_output_stream(
 /// Closes the file if the sink creation fails.
 future<data_sink> make_file_data_sink(file, file_output_stream_options) noexcept;
 
-SEASTAR_MODULE_EXPORT_END
+/// \defgroup pipe-streams Pipe / stream-fd streams
+///
+/// These factories create reactor-integrated byte streams backed by any
+/// stream-oriented file descriptor: anonymous pipes, named FIFOs, character
+/// devices, PTYs, or sockets.  I/O is performed non-blocking via the reactor
+/// (poll + read/writev), making them suitable for any fd that supports plain
+/// read(2)/write(2) but not seekable or O_DIRECT I/O.
+///
+/// Two construction modes are available:
+///  - From a \c file_desc (takes ownership of the fd).
+///  - From a filesystem path (opens the device asynchronously via the thread
+///    pool with O_NONBLOCK).
+/// @{
+
+/// Create an input_stream that reads from \p fd.
+/// The stream takes ownership of \p fd.
+input_stream<char> make_pipe_input_stream(file_desc fd, size_t buffer_size = 8192);
+
+/// Create an output_stream that writes to \p fd.
+/// The stream takes ownership of \p fd.
+output_stream<char> make_pipe_output_stream(file_desc fd, size_t buffer_size = 8192);
+
+/// Asynchronously open the path \p path for reading and return an
+/// input_stream backed by it.
+future<input_stream<char>> make_pipe_input_stream(std::filesystem::path path, size_t buffer_size = 8192);
+
+/// Asynchronously open the path \p path for writing and return an
+/// output_stream backed by it.
+future<output_stream<char>> make_pipe_output_stream(std::filesystem::path path, size_t buffer_size = 8192);
+
+/// @}
+
 
 }

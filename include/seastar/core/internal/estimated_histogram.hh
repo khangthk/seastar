@@ -22,11 +22,9 @@
 #pragma once
 
 #include <cmath>
-#include <algorithm>
-#include <vector>
 #include <chrono>
+#include <string>
 #include <seastar/core/metrics_types.hh>
-#include <seastar/core/print.hh>
 #include <seastar/core/bitops.hh>
 #include <limits>
 #include <array>
